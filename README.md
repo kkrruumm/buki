@@ -44,7 +44,8 @@ This script supports both llvm-objcopy and binutils' objcopy to build the UKI.
 # Miscellaneous options
   - `-b` - Forces UKI to be built with binutils objcopy rather than llvm-objcopy.
   - `-l` - Forces UKI to be built with llvm-objcopy rather than binutils.
-         If an objcopy variant is not explicitly set, the first one found on the system will be used.
+
+  If an objcopy variant is not explicitly set, the first one found on the system will be used.
 
   - `-v` - Verbose output when building a UKI
 
