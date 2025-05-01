@@ -139,7 +139,8 @@ build() {
             --set-section-flags .initrd=code,readonly \
             --add-section .linux="$kernel" \
             --set-section-flags .linux=code,readonly \
-            "$stub" "$output"
+            "$stub" "$output" ||
+	    die "Creating UKI has failed. Cannot continue."
     elif [ "$utils" = "binutils" ] ; then
         info "Building UKI with binutils objcopy..."
         # https://github.com/jirutka/efi-mkuki/blob/master/efi-mkuki
