@@ -1,0 +1,219 @@
+#!/usr/bin/env sh
+#
+# https://www.shellcheck.net/wiki/SC2004
+# shellcheck disable=2004
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BOLD='\033[1m'
+CLEAR='\033[0m'
+
+die() {
+    printf "%b\n" "${RED}FATAL:${CLEAR} $1"
+    exit 1
+}
+
+info() {
+    printf "%b\n" "${YELLOW}INFO:${CLEAR} $1"
+    return 0
+}
+
+help() {
+    printf "%b\n\n" "buki v0.1 - Simple POSIX shell UKI builder
+
+${BOLD}Usage:${CLEAR}
+
+buki build -i </path/to/initramfs> -k </path/to/kernel> -o </path/to/esp/bootx64.efi> [-c 'loglevel=4 init_on_free=1'] [-s /usr/lib/systemd/boot/efi/linuxx64.efi.stub] [...]
+
+${BOLD}Options:${CLEAR}
+  -c   Specify kernel cmdline or path to file containing kernel parameters if begins with '.' or '/'
+       If nothing is specified, buki will default to '/proc/cmdline'
+       If passed a set of parameters directly, '/tmp/bukitmp/cmdline' will be created and
+       will then be passed into objcopy.
+
+  -i   Specify path to initramfs image
+
+  -k   Specify path to kernel
+
+  -m   Specify path to microcode image
+       If nothing is specified, UKI will be built without microcode
+       If specified, '/tmp/bukitmp/buki-combined_initrd.img' will be created, and will contain
+       the concatenated microcode and the initrd, and will then be passed into objcopy.
+
+  -o   Specify path to output the built UKI
+
+  -r   Specify path to os-release information
+       If nothing is specified, buki will default to '/etc/os-release'
+
+  -s   Specify path to EFI stub file
+       If nothing is specified, buki will default to '/usr/lib/systemd/boot/efi/march.efi.stub'
+
+${BOLD}Misc:${CLEAR}
+  -b   Forces UKI to be built with binutils objcopy rather than llvm-objcopy
+  -l   Forces UKI to be built with llvm-objcopy rather than binutils
+       If an objcopy variant is not explicitly set, the first one found on the system will be used.
+
+  -v   Verbose output when building a UKI
+
+       These flags do not take an argument.
+
+The order these options are set in does not matter."
+
+    exit
+}
+
+build() {
+    if [ -z "$stub" ] ; then
+        case "$(uname -m)" in
+            aarch64) march=aa64 ;;
+            arm*) march=arm ;;
+            x86|i686) march=ia32 ;;
+            x86_64) march=x64 ;;
+            *) die "Unknown arch: $(uname -m). Cannot continue."
+        esac
+
+        stub="/usr/lib/systemd/boot/efi/linux$march.efi.stub"
+        unset march
+    fi
+
+    [ -z "$release" ] &&
+        release="/etc/os-release"
+
+    for i in "$kernel" "$initramfs" "$stub" "$release" ; do
+        [ ! -e "$i" ] &&
+            die "$i does not appear to exist. Cannot continue."
+    done
+
+    if [ -z "$cmdline" ] ; then
+        cmdline="/proc/cmdline"
+    else
+        case "$cmdline" in
+            .* | /*) [ -e "$cmdline" ] || die "$cmdline does not appear to exist. Cannot continue." ;;
+            *)
+               [ ! -e "/tmp/bukitmp" ] &&
+                   { mkdir /tmp/bukitmp || die "/tmp/bukitmp does not appear to exist, but creating it has failed. Cannot continue." ; }
+
+               printf '%s\n' "$cmdline" > "/tmp/bukitmp/cmdline" ||
+                   die "Writing cmdline to /tmp/bukitmp/cmdline has failed. Cannot continue."
+
+               cmdline="/tmp/bukitmp/cmdline"
+            ;;
+        esac
+    fi
+
+    if [ -n "$microcode" ] ; then
+        [ ! -e "$microcode" ] &&
+            die "$microcode does not appear to exist. Cannot continue."
+
+        [ ! -e "/tmp/bukitmp" ] &&
+            { mkdir /tmp/bukitmp || die "/tmp/buki does not appear to exist, but creating it has failed. Cannot continue." ; }
+
+        [ -e "/tmp/bukitmp/combined_initrd.img" ] &&
+            { rm /tmp/bukitmp/buki-combined_initrd.img || die "Old combined initramfs image found, but removal has failed. Cannot continue." ; }
+
+        cat "$microcode" "$initramfs" > /tmp/bukitmp/buki-combined_initrd.img ||
+            die "Writing combined initramfs image has failed. Cannot continue."
+
+        initramfs="/tmp/bukitmp/buki-combined_initrd.img"
+    fi
+
+    [ "$verbose" = "true" ] &&
+        for i in cmdline stub initramfs kernel microcode output release utils ; do
+            eval x='$'"$i"
+            info "$i: $x"
+            unset x i
+        done
+
+    [ -e "$output" ] &&
+        { info "Old UKI found, removing..." ; rm "$output" || die "Old UKI found, but removal has failed. Cannot continue." ; }
+
+    if [ "$utils" = "llvm" ] ; then
+        info "Building UKI with llvm-objcopy..."
+        llvm-objcopy \
+            --add-section .osrel="$release" \
+            --set-section-flags .osrel=data,readonly \
+            --add-section .cmdline="$cmdline" \
+            --set-section-flags .cmdline=data,readonly \
+            --add-section .initrd="$initramfs" \
+            --set-section-flags .initrd=code,readonly \
+            --add-section .linux="$kernel" \
+            --set-section-flags .linux=code,readonly \
+            "$stub" "$output"
+    elif [ "$utils" = "binutils" ] ; then
+        info "Building UKI with binutils objcopy..."
+        # https://github.com/jirutka/efi-mkuki/blob/master/efi-mkuki
+        # Kernel sizes can sometimes be larger than 16MiB; cacluate a safe location for
+        # the initrd.
+        kernel_offset='0x2000000'
+        kernel_size="$(stat -c '%s' "$kernel")"
+        # Initrd offset is the first page-aligned (0x...000) address that's 0x1000000
+        # (16MiB) from the end of the kernel.
+        initrd_offset="0x$(printf '%x\n' "$(( ( 1 + ( 0x1000000 + $kernel_offset + $kernel_size ) / 0x1000) * 0x1000 ))")"
+        objcopy \
+            --add-section .osrel="$release" --change-section-vma .osrel="0x20000" \
+            --add-section .cmdline="$cmdline" --change-section-vma .cmdline="0x30000" \
+            --add-section .linux="$kernel" --change-section-vma ".linux=$kernel_offset" \
+            --add-section .initrd="$initramfs" --change-section-vma ".initrd=$initrd_offset" \
+            "$stub" "$output" ||
+            die "Creating UKI has failed. Cannot continue."
+
+        objcopy --adjust-vma 0 "$output" ||
+            die "Running adjust-vma on UKI has failed. Cannot continue."
+
+        unset kernel_offset kernel_size initrd_offset
+    fi
+
+    if [ -e "$output" ] ; then
+        printf "%b\n" "${GREEN}SUCCESS:${CLEAR} Wrote UKI at${YELLOW} $output ${CLEAR}successfully."
+        exit 0
+    else
+        die "Writing UKI has failed. Cannot continue."
+    fi
+
+    unset cmdline stub initramfs kernel microcode output release utils
+    exit 0
+}
+
+case "$1" in
+    build)
+        [ "$(id -u)" != "0" ] &&
+            die "buki build must be run as root. Cannot continue."
+
+        shift
+        while getopts "c:i:k:m:o:r:s:vbl" opts; do
+            case "${opts}" in
+                c) cmdline="${OPTARG}" ;;
+                i) initramfs="${OPTARG}" ;;
+                k) kernel="${OPTARG}" ;;
+                m) microcode="${OPTARG}" ;;
+                o) output="${OPTARG}" ;;
+                r) release="${OPTARG}" ;;
+                s) stub="${OPTARG}" ;;
+                b) utils="binutils" ;;
+                l) utils="llvm" ;;
+                v) verbose="true" ;;
+                *) die "Undefined option. See 'buki help' for usage information." ;;
+            esac
+        done
+
+        for i in initramfs kernel output ; do
+            eval x='$'"$i"
+            [ -z "$x" ] &&
+                die "$i is unset. Cannot continue."
+            unset x i
+        done
+
+        [ -z "$utils" ] &&
+            if command -v llvm-objcopy > /dev/null ; then
+                utils="llvm"
+            elif command -v objcopy > /dev/null ; then
+                utils="binutils"
+            else
+                die "llvm-objcopy / objcopy not found in PATH. Cannot continue."
+            fi
+
+        build
+    ;;
+    *) help ;;
+esac
