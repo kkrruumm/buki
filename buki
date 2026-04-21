@@ -198,12 +198,9 @@ case "$1" in
             esac
         done
 
-        for i in initramfs kernel output ; do
-            eval x='$'"$i"
-            [ -z "$x" ] &&
-                die "$i is unset. Cannot continue."
-            unset x i
-        done
+        : "${initramfs:?variable unset. Cannot continue.}"
+        : "${kernel:?variable unset. Cannot continue.}"
+        : "${output:?variable unset. Cannot continue.}"
 
         [ -z "$utils" ] &&
             if command -v llvm-objcopy > /dev/null ; then
